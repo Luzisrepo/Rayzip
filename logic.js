@@ -1,4 +1,4 @@
-// Updated logic.js — fixes for encode/decode bit order and available space calculation
+// Updated logic.js with decoding fix — ensures bitstream continuity after header
 
 // Initialize particles.js
 document.addEventListener('DOMContentLoaded', function() {
@@ -610,6 +610,7 @@ async function decodeFile() {
     }
 }
 
+// --- UPDATED DECODING FUNCTION WITH BITSTREAM CONTINUITY FIX ---
 async function extractHiddenFile(img) {
     return new Promise((resolve, reject) => {
         try {
@@ -631,16 +632,16 @@ async function extractHiddenFile(img) {
 
             updateProgress(5, 'Reading header...');
 
-            // Extract header
+            // Extract header continuously
             const header = new Uint8Array(CONFIG.HEADER_SIZE);
             let headerIndex = 0;
-            let bitIndex = 0; // bit position within the reconstructed byte (0 = LSB)
+            let bitIndex = 0;
+            let pixelIndex = 0;
 
-            for (let i = 0; i < pixels.length && headerIndex < CONFIG.HEADER_SIZE; i += 4) {
+            for (; pixelIndex < pixels.length && headerIndex < CONFIG.HEADER_SIZE; pixelIndex += 4) {
                 for (let j = 0; j < 3 && headerIndex < CONFIG.HEADER_SIZE; j++) {
-                    const bit = pixels[i + j] & 1;
-                    header[headerIndex] |= (bit << bitIndex); // LSB-first reconstruction
-
+                    const bit = pixels[pixelIndex + j] & 1;
+                    header[headerIndex] |= (bit << bitIndex);
                     bitIndex++;
                     if (bitIndex >= 8) {
                         bitIndex = 0;
@@ -651,18 +652,11 @@ async function extractHiddenFile(img) {
 
             updateProgress(15, 'Validating header...');
 
-            // Validate header signature
             const headerStr = String.fromCharCode(...header.slice(0, CONFIG.HEADER_SIGNATURE.length));
-            if (headerStr !== CONFIG.HEADER_SIGNATURE) {
-                throw new Error('No hidden file found or invalid signature');
-            }
+            if (headerStr !== CONFIG.HEADER_SIGNATURE) throw new Error('No hidden file found or invalid signature');
 
-            // Extract file size with bounds checking (little-endian)
             const fileSize = header[6] | (header[7] << 8) | (header[8] << 16) | (header[9] << 24);
-
-            if (fileSize <= 0 || fileSize > CONFIG.MAX_FILE_SIZE) {
-                throw new Error(`Invalid file size: ${utils.formatFileSize(fileSize)}`);
-            }
+            if (fileSize <= 0 || fileSize > CONFIG.MAX_FILE_SIZE) throw new Error(`Invalid file size: ${utils.formatFileSize(fileSize)}`);
 
             updateProgress(25, 'Extracting data...');
 
@@ -671,73 +665,52 @@ async function extractHiddenFile(img) {
             bitIndex = 0;
             let currentByte = 0;
 
-            const startPixel = Math.ceil((CONFIG.HEADER_SIZE * 8) / 3);
             const chunkSize = 10000;
 
             const processChunk = (startIndex) => {
                 const endIndex = Math.min(startIndex + chunkSize, pixels.length);
-
                 for (let i = startIndex; i < endIndex && dataIndex < fileSize; i += 4) {
                     for (let j = 0; j < 3 && dataIndex < fileSize; j++) {
                         const bit = pixels[i + j] & 1;
-                        currentByte |= (bit << bitIndex); // LSB-first reconstruction
-
+                        currentByte |= (bit << bitIndex);
                         bitIndex++;
                         if (bitIndex >= 8) {
                             fileData[dataIndex] = currentByte;
                             bitIndex = 0;
                             currentByte = 0;
                             dataIndex++;
-
-                            if (dataIndex % CONFIG.PROGRESS_UPDATE_INTERVAL === 0 || dataIndex === fileSize) {
-                                const progress = Math.min(95, 25 + Math.floor(dataIndex / fileSize * 70));
-                                updateProgress(progress, `Extracting... ${Math.floor(dataIndex / fileSize * 100)}%`);
-                            }
                         }
                     }
                 }
-
                 if (endIndex < pixels.length && dataIndex < fileSize) {
                     setTimeout(() => processChunk(endIndex), 10);
                 } else {
-                    // Validate ZIP file signature
-                    if (fileData.length < 4 ||
-                        fileData[0] !== 0x50 || fileData[1] !== 0x4B ||
-                        fileData[2] !== 0x03 || fileData[3] !== 0x04) {
+                    if (fileData.length < 4 || fileData[0] !== 0x50 || fileData[1] !== 0x4B || fileData[2] !== 0x03 || fileData[3] !== 0x04) {
                         reject(new Error('Extracted data is not a valid ZIP file'));
                         return;
                     }
-
                     updateProgress(100, 'Extraction complete!');
-
-                    // Create download
                     const blob = new Blob([fileData], { type: 'application/zip' });
                     const url = URL.createObjectURL(blob);
-
                     const fileNameEl = utils.getElement('extractedFileName');
                     const fileSizeEl = utils.getElement('extractedFileSize');
                     const decodeOutput = utils.getElement('decodeOutput');
-
                     if (fileNameEl) fileNameEl.textContent = 'hidden_file.zip';
                     if (fileSizeEl) fileSizeEl.textContent = utils.formatFileSize(fileSize);
                     if (decodeOutput) decodeOutput.classList.remove('hidden');
-
                     const downloadButton = utils.getElement('downloadExtractedButton');
-                    if (downloadButton) {
-                        downloadButton.onclick = () => {
-                            const link = document.createElement('a');
-                            link.download = 'hidden_file.zip';
-                            link.href = url;
-                            link.click();
-                        };
-                    }
-
+                    if (downloadButton) downloadButton.onclick = () => {
+                        const link = document.createElement('a');
+                        link.download = 'hidden_file.zip';
+                        link.href = url;
+                        link.click();
+                    };
                     resolve();
                 }
             };
 
-            // Start reading data after header
-            setTimeout(() => processChunk(startPixel * 4), CONFIG.ANIMATION_DELAY);
+            // Continue from where header stopped
+            setTimeout(() => processChunk(pixelIndex), CONFIG.ANIMATION_DELAY);
 
         } catch (error) {
             reject(error);
